@@ -5,6 +5,8 @@ metadata:
   annotations:
     pipelinesascode.tekton.dev/on-comment: "^((/test-all)|(/build-test))$"
     pipelinesascode.tekton.dev/max-keep-runs: "5"
+    pipelinesascode.tekton.dev/on-event: "[incoming]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main**]"
     pipelinesascode.tekton.dev/on-cel-expression: |-
       (
         "abc/.tekton/pr-test.yaml".pathChanged() ||
