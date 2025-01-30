@@ -1,0 +1,55 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: pr-test
+  annotations:
+    pipelinesascode.tekton.dev/on-comment: "^((/test-all)|(/build-test))$"
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+    pipelinesascode.tekton.dev/on-cel-expression: |-
+      (
+        "abc/.tekton/pr-test.yaml".pathChanged() ||
+        last_commit_title.contains("Auto-commit")
+      ) && ((
+        event == "push" && (
+          source_branch.matches("^(main|master|release-.*)$") ||
+          target_branch.matches("^(main|master|release-.*)$") ||
+          target_branch.startsWith("refs/tags/")
+        )
+      ) || (
+        event == "pull_request" && (
+          target_branch.matches("^(main|master|release-.*)$")
+        )
+      ))
+spec:
+  pipelineSpec:
+    params:
+      - name: tips
+        default: "This is a test pipeline"
+    tasks:
+      - name: hello
+        taskSpec:
+          steps:
+            - name: hello
+              image: registry.alauda.cn:60080/ops/ubuntu:latest
+              script: |
+                #!/bin/bash
+                echo "$(params.tips)"
+
+  params:
+    - name: git-url
+      value: "{{ repo_url }}"
+    - name: git-revision
+      value: "{{ source_branch }}"
+    - name: git-commit
+      value: "{{ revision }}"
+
+    # 用于更新 values.yaml 中指定制品的版本
+    # 例如: ".global.images.ui.tag=latest,.global.images.api.tag=latest"
+    - name: tips
+      value: "{{ overwrite_artifacts }}"
+
+  workspaces:
+    # This secret will be replaced by the pac controller
+    - name: basic-auth
+      secret:
+        secretName: "{{ git_auth_secret }}"
