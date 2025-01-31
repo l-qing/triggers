@@ -4,12 +4,13 @@ metadata:
   name: pr-test
   annotations:
     pipelinesascode.tekton.dev/on-comment: "^((/test-all)|(/build-test))$"
+    pipelinesascode.tekton.dev/task: '[.tekton/git-version.yaml,.tekton/git-clone.yaml]'
     pipelinesascode.tekton.dev/max-keep-runs: "5"
     pipelinesascode.tekton.dev/on-event: "[incoming]"
     pipelinesascode.tekton.dev/on-target-branch: "[main**]"
     pipelinesascode.tekton.dev/on-cel-expression: |-
       (
-        "abc/.tekton/pr-test.yaml".pathChanged() ||
+        ".tekton/pr-test.yaml".pathChanged() ||
         last_commit_title.contains("Auto-commit")
       ) && ((
         event == "push" && (
@@ -37,6 +38,42 @@ spec:
                 #!/bin/bash
                 echo "$(params.tips)"
 
+      - name: git-clone
+        timeout: 10m
+        retries: 3
+        taskRef:
+          name: git-clone
+
+        params:
+          - name: url
+            value: $(params.git-url)
+          - name: revision
+            value: $(params.git-revision)
+
+        workspaces:
+          - name: output
+            workspace: source
+          - name: basic-auth
+            workspace: basic-auth
+
+      - name: git-version
+        runAfter:
+          - git-clone
+        params:
+          - name: gitversion-image
+            value: registry.alauda.cn:60080/devops/gittools/gitversion:6.0.5
+          - name: yq-image
+            value: registry.alauda.cn:60080/devops/noroot/yq:latest
+        taskRef:
+          name: git-version
+        timeout: 10m0s
+        retries: 3
+        workspaces:
+          - name: source
+            workspace: source
+          - name: basic-auth
+            workspace: basic-auth
+
   params:
     - name: git-url
       value: "{{ repo_url }}"
@@ -55,3 +92,11 @@ spec:
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi

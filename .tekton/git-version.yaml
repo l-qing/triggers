@@ -1,0 +1,208 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-version
+  labels:
+    app.kubernetes.io/version: "0.2"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.53.0"
+    tekton.dev/displayName: "git version"
+    tekton.dev/categories: Git
+    tekton.dev/tags: git
+    tekton.dev/platforms: "linux/amd64,linux/arm64"
+spec:
+  description: >-
+    This task can be used to create a version from git history
+  params:
+    - name: gitversion-image
+      default: gittools/gitversion:6.0.5
+      description: The git-version image utilized for calculating git version.
+      type: string
+    - name: yq-image
+      default: mikefarah/yq:4.44.6
+      description: The yq image utilized for formatting the git version.
+      type: string
+    - name: commit
+      type: string
+      description: Optional commit to reset a copy of the repository to and regenarating a version from previous commits. This will not affect current source workspace.
+      default: ''
+    - name: config-file
+      type: string
+      description: Config file name in optional config workspace to be used as override. Defaults to 'GitVersion.yaml'
+      default: 'GitVersion.yaml'
+    - name: pre-command
+      type: string
+      default: ""
+      description: |
+        Commands to execute before running GitVersion.
+        This environment variables can be used in the pre-command:
+        - `GITVERSION_BINARY`: Path to the GitVersion binary.
+        - `CUSTOM_CONFIG`: Path to the custom config file.
+        - `FINAL_GITVERSION_CONFIG`: Path to the final GitVersion config file.
+        - `FINAL_RESULTS_PATH`: Path to the final results file.
+    - name: post-command
+      type: string
+      default: ""
+      description: |
+        Commands to execute after running GitVersion.
+        This environment variables can be used in the post-command:
+        - `GITVERSION_BINARY`: Path to the GitVersion binary.
+        - `CUSTOM_CONFIG`: Path to the custom config file.
+        - `FINAL_GITVERSION_CONFIG`: Path to the final GitVersion config file.
+        - `FINAL_RESULTS_PATH`: Path to the final results file.
+  results:
+    - name: version
+      description: The calculated git version you could use for git tagging e.g. "0.1.0-tektonize.1-188". It uses the FullSemVer variable value.
+
+    - name: variables
+      description: Stores all variables generated from GitVersion. For a complete reference see https://gitversion.net/5.12.0/docs/reference/variables
+      type: object
+      properties:
+        AssemblySemFileVer: {}
+        BranchName: {}
+        FullSemVer: {}
+        SemVer: {}
+        InformationalVersion: {}
+        PreReleaseLabel: {}
+        PreReleaseTag: {}
+        Major: {}
+        Minor: {}
+        Patch: {}
+        Sha: {}
+        ShortSha: {}
+
+  steps:
+    - image: $(params.gitversion-image)
+      name: calculate-version
+      workingDir: $(workspaces.source.path)
+      # computeResources:
+      #   requests:
+      #     cpu: "250m"
+      #     memory: "256Mi"
+      #   limits:
+      #     cpu: "500m"
+      #     memory: "512Mi"
+      ## TODO: remove this from future releases
+      securityContext:
+        runAsUser: 0
+      env:
+      ### !!! copied from git clone to solve git fetching credentials in basic auth
+      - name: WORKSPACE_BASIC_AUTH_DIRECTORY_BOUND
+        value: $(workspaces.basic-auth.bound)
+      - name: WORKSPACE_BASIC_AUTH_DIRECTORY_PATH
+        value: $(workspaces.basic-auth.path)
+      script: |
+        #!/usr/bin/env sh
+        set -e
+        export PATH="$PATH:/tools"
+
+        ### !!! copied from git clone to solve git fetching credentials in basic auth
+        if [ "${WORKSPACE_BASIC_AUTH_DIRECTORY_BOUND}" = "true" ] ; then
+          cp "${WORKSPACE_BASIC_AUTH_DIRECTORY_PATH}/.git-credentials" "${HOME}/.git-credentials"
+          cp "${WORKSPACE_BASIC_AUTH_DIRECTORY_PATH}/.gitconfig" "${HOME}/.gitconfig"
+          chmod 400 "${HOME}/.git-credentials"
+          chmod 400 "${HOME}/.gitconfig"
+        fi
+
+        # Check if this is a shallow clone
+        git config --global --add safe.directory $(workspaces.source.path)
+        if [ -f .git/shallow ]; then
+          echo "==> Detected shallow clone, fetching complete history..."
+          git fetch --unshallow --tags --no-recurse-submodules
+        fi
+
+        export FINAL_GITVERSION_CONFIG=/shared/GitVersion.yaml
+        export FINAL_RESULTS_PATH=/shared/results.json
+
+        export GITVERSION_BINARY=/tools/dotnet-gitversion
+        # export GITVERSION=$($GITVERSION_BINARY -config $FINAL_GITVERSION_CONFIG)
+        export CUSTOM_CONFIG=$(workspaces.config.path)/$(params.config-file)
+
+        ## Checking if there is a config in the repo
+        if [  -f GitVersion.yaml ]; then
+          echo "==> Found GitVersion.yaml in repository..."
+          cp GitVersion.yaml $FINAL_GITVERSION_CONFIG
+        else
+          echo "==> No GitVersion.yaml in repository... generating default config..."
+          $($GITVERSION_BINARY -showconfig) > $FINAL_GITVERSION_CONFIG || true
+        fi
+        ## Checking for a custom overrided config
+        if [ "$(workspaces.config.bound)" = "true" ] && [ -f "$CUSTOM_CONFIG" ]; then
+          echo "==> Found custom config $(params.config-file) in config workspace as $CUSTOM_CONFIG ..."
+          cp -f $CUSTOM_CONFIG $FINAL_GITVERSION_CONFIG
+        elif [ "$(workspaces.config.bound)" = "true" ] && [ ! -f "$CUSTOM_CONFIG" ]; then
+          echo "==! config workspace is bound but no $(params.config-file) file was found... ignoring config workspace..."
+        fi
+
+        # Check if we need to reset the git commit
+        # 1. If the commit is empty, we don't need to reset
+        # 2. If the current commit is the expected one, we don't need to reset
+        reset_git_commit=true
+        current_commit=$(git rev-parse HEAD | tr -d '\n')
+        if [ -z "$(params.commit)" ] || [ "${current_commit}" = "$(params.commit)" ]; then
+          reset_git_commit=false
+        fi
+
+        export REPO_PATH=$(workspaces.source.path)
+        if [ "${reset_git_commit}" = "true" ]; then
+          echo "==> Requested version from a specific commit $(params.commit) is different with current commit ${current_commit}. Will copy the repository and reset to specified commit..."
+          mkdir -p /shared/repo
+          cp -r $(workspaces.source.path) /shared/repo
+          ls -la /shared/repo/source
+          export REPO_PATH=/shared/repo/source
+          echo "==> Reseting to commit $(params.commit)..."
+          git -C $REPO_PATH reset $(params.commit) --hard
+        fi
+
+        # Execute pre-command if specified
+        $(params.pre-command)
+
+        echo "==> calculating gitversion..."
+        echo -n "$($GITVERSION_BINARY $REPO_PATH -config $FINAL_GITVERSION_CONFIG)" | tee $FINAL_RESULTS_PATH || true
+
+        # Execute post-command if specified
+        $(params.post-command)
+
+      volumeMounts:
+      - mountPath: /shared
+        name: shared
+    - image: $(params.yq-image)
+      name: format-content
+      ## TODO: remove this from future releases
+      securityContext:
+        runAsUser: 0
+      script: |
+        #!/bin/sh
+        set -e
+
+        yq --version
+
+        echo "==> converting all values to string..."
+
+        yq e '.[] |= to_string' -o=json -I=0 --inplace /shared/results.json
+
+        cat /shared/results.json | tee $(results.variables.path)
+
+        echo "==> saving fullSemVer result..."
+
+        yq e '.FullSemVer' /shared/results.json > $(results.version.path)
+      volumeMounts:
+      - mountPath: /shared
+        name: shared
+
+  workspaces:
+    - name: source
+      description: A workspace that contains the fetched git repository to create a version for.
+    - name: config
+      description : Workspace hosting an optional `GitVersion.yaml`
+      optional: true
+    - name: basic-auth
+      optional: true
+      description: >
+        A Workspace containing a .gitconfig and .git-credentials file. These
+        will be copied to the user's home before any git commands are run. Any
+        other files in this Workspace are ignored.
+  volumes:
+  - name: shared
+    emptyDir: {}
