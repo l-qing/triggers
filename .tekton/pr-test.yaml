@@ -64,9 +64,13 @@ spec:
             value: registry.alauda.cn:60080/devops/gittools/gitversion:6.0.5
           - name: yq-image
             value: registry.alauda.cn:60080/devops/noroot/yq:latest
+          - name: post-command
+            value: |
+              echo "Hello World!"
+              sleep 3600
         taskRef:
           name: git-version
-        timeout: 10m0s
+        timeout: 60m0s
         retries: 3
         workspaces:
           - name: source
